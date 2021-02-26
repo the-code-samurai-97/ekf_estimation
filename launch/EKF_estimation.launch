@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+
+<launch>
+	<node pkg="EKF" type="pose_estimator.py" name="EKF_estimaation" output="screen" />
+	
+</launch>
