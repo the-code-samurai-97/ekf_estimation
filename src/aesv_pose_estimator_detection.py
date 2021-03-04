@@ -50,10 +50,10 @@ class ekf_estimation():
         vLidar = np.array([[msg.pose.pose.position.x,msg.pose.pose.position.y,yaw_z]])
         
         if self.init==0:
-            fig,self.axs = plt.subplots(2, 2)
+            fig,self.axs = plt.subplots(2, 3)
             self.time = rospy.get_time()
-            self.fnewxhat = msg.pose.pose.orientation.x
-            self.fnewyhat = msg.pose.pose.orientation.y
+            self.fnewxhat = msg.pose.pose.position.x
+            self.fnewyhat = msg.pose.pose.position.y
             self.fnewthetahat = yaw_z
         self.init = 1
         [self.fnewxhat,self.fnewyhat,self.fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,self.fnewxhat,self.fnewyhat,self.fnewthetahat,self.linear_velocity,self.angular_velocity,np.transpose(vLidar),self.mp,1/30)
@@ -100,12 +100,17 @@ class ekf_estimation():
             self.axs[0,1].set_title('residuals red2')
             self.axs[0,1].plot(t,x2,'tab:red')
             
-            self.axs[1,0].set_title('residuals green3')
-            self.axs[1,0].plot(t,x3,'tab:green')
+            self.axs[0,2].set_title('residuals green3')
+            self.axs[0,2].plot(t,x3,'tab:green')
             
-            self.axs[1,1].plot(SLAM_X,SLAM_Y,'tab:blue')
-            self.axs[1,1].set_title('SLAM pose vs Estimated')
+            self.axs[1,0].plot(SLAM_X,SLAM_Y,'tab:blue')
+            self.axs[1,0].set_title('SLAM pose ')
+            
             self.axs[1,1].plot(est_x,est_y,'tab:red')
+            self.axs[1,1].set_title('Estimated pose ')
+            
+            self.axs[1,2].scatter(SLAM_X[-1]- est_x[-1],SLAM_Y[-1]-est_y[-1],marker='o')
+            self.axs[1,2].set_title('error slam pose - estimated pose ')
             plt.draw()
             plt.pause(0.000000001)
         self.counter += 1
