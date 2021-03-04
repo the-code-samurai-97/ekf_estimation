@@ -3,7 +3,7 @@ import rospy, numpy as np,math,matplotlib.pyplot as plt
 from ParametersInitialization import *
 from EKF_estimation_algorithm import *
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist, Pose, Point, Quaternion
+from geometry_msgs.msg import Twist, Pose, Point, Quaternion, PoseStamped
 from ackermann_msgs.msg import AckermannDriveStamped,AckermannDrive
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 
@@ -12,9 +12,20 @@ from tf.transformations import quaternion_from_euler, euler_from_quaternion
 class ekf_estimation():
     #### initialization
     def __init__(self):
+        self.VEHICLE = 3 ## 1: Pioneer; 2: ACRONIS; 3: AESV
         self.pub = rospy.Publisher('ekf_estimated_Pose',Odometry)
-        rospy.Subscriber('cmd_vel',AckermannDriveStamped, self.cmd_vel_callback)
-        rospy.Subscriber('global_odom',Odometry,self.odometry_callback)
+        if self.VEHICLE == 3:
+            rospy.Subscriber('cmd_vel',AckermannDriveStamped, self.aesv_cmd_vel_callback)
+            rospy.Subscriber('global_odom',Odometry,self.odometry_callback)
+        elif self.VEHICLE == 2:
+            rospy.Subscriber('twist_cmd',TwistStamped, self.acronis_cmd_vel_callback)
+            rospy.Subscriber('ndt_pose',PoseStamped,self.acronis_odometry_callback)
+        elif self.VEHICLE == 1:
+            rospy.Subscriber('RosAria/cmd_vel',Twist, self.pioneer_cmd_vel_callback)
+            rospy.Subscriber('robot_to_map',Odometry,self.odometry_callback)
+        else:
+            print("Select Vehicle Correctly")
+            
         self.init = 0
         self.detection_init = 0
         self.counter = 0
@@ -37,34 +48,62 @@ class ekf_estimation():
         self.covMatrix = np.zeros([3,3])
         self.stack_residue = list()
         self.cumsum = list()
+        self.vLidar = np.zeros(3)
         self.ekf = Odometry()
     
     #### velocity call back 
-    def cmd_vel_callback(self,msg):
+    def aesv_cmd_vel_callback(self,msg):
         self.linear_velocity = msg.drive.speed
         self.angular_velocity = msg.drive.steering_angle_velocity
     
-    #### odometry call back
-    def odometry_callback(self,msg):
-        [roll,pitch,yaw_z] = euler_from_quaternion([msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,msg.pose.pose.orientation.z,msg.pose.pose.orientation.w])
-        vLidar = np.array([[msg.pose.pose.position.x,msg.pose.pose.position.y,yaw_z]])
+    def acronis_cmd_vel_callback(self,msg):
+        self.linear_velocity = msg.twist.linear.x
+        self.angular_velocity = msg.twist.angular.z
+    
+    def pioneer_cmd_vel_callback(self,msg):
+        self.linear_velocity = msg.linear.x
+        self.angular_velocity = msg.angular.z
+    def acronis_odometry_callback(self,msg):
+        [roll,pitch,yaw_z] = euler_from_quaternion([msg.pose.orientation.x,msg.pose.orientation.y,msg.pose.orientation.z,msg.pose.orientation.w])
+        self.vLidar = np.array([[msg.pose.position.x,msg.pose.position.y,yaw_z]])
         
         if self.init==0:
             fig,self.axs = plt.subplots(2, 3)
             self.time = rospy.get_time()
-            self.fnewxhat = msg.pose.pose.position.x
-            self.fnewyhat = msg.pose.pose.position.y
-            self.fnewthetahat = yaw_z
+            self.fnewxhat = self.vLidar[0][0]
+            self.fnewyhat = self.vLidar[0][1]
+            self.fnewthetahat = self.vLidar[0][2]
         self.init = 1
-        [self.fnewxhat,self.fnewyhat,self.fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,self.fnewxhat,self.fnewyhat,self.fnewthetahat,self.linear_velocity,self.angular_velocity,np.transpose(vLidar),self.mp,1/30)
+        [self.fnewxhat,self.fnewyhat,self.fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,self.fnewxhat,self.fnewyhat,self.fnewthetahat,self.linear_velocity,self.angular_velocity,np.transpose(self.vLidar),self.mp,1/30)
+        self.sensor_detection(fresidual)
+        if np.max(fresidual)==0:
+            print("residual_zero",rospy.get_time() - self.time)
+        else:
+            self.store_values(msg.pose.position.x,msg.pose.position.y,fresidual[0][0],fresidual[1][0],fresidual[2][0])
+        self.publish_ekf_estimator(msg.header.frame_id,msg.child_frame_id,msg.header.stamp,self.fnewxhat,self.fnewyhat,self.fnewthetahat)
+        
+    #### odometry call back
+    def odometry_callback(self,msg):
+        [roll,pitch,yaw_z] = euler_from_quaternion([msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,msg.pose.pose.orientation.z,msg.pose.pose.orientation.w])
+        self.vLidar = np.array([[msg.pose.pose.position.x,msg.pose.pose.position.y,yaw_z]])
+        
+        if self.init==0:
+            fig,self.axs = plt.subplots(2, 3)
+            self.time = rospy.get_time()
+            self.fnewxhat = self.vLidar[0][0]
+            self.fnewyhat = self.vLidar[0][1]
+            self.fnewthetahat = self.vLidar[0][2]
+        self.init = 1
+        [self.fnewxhat,self.fnewyhat,self.fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,self.fnewxhat,self.fnewyhat,self.fnewthetahat,self.linear_velocity,self.angular_velocity,np.transpose(self.vLidar),self.mp,1/30)
         self.sensor_detection(fresidual)
         if np.max(fresidual)==0:
             print("residual_zero",rospy.get_time() - self.time)
         else:
             self.store_values(msg.pose.pose.position.x,msg.pose.pose.position.y,fresidual[0][0],fresidual[1][0],fresidual[2][0])
-        self.ekf_estimator(msg.header.frame_id,msg.child_frame_id,msg.header.stamp,self.fnewxhat,self.fnewyhat,self.fnewthetahat)
+        self.publish_ekf_estimator(msg.header.frame_id,msg.child_frame_id,msg.header.stamp,self.fnewxhat,self.fnewyhat,self.fnewthetahat)
+    
     #### Publishing Estimated values
-    def ekf_estimator(self,header,frame_id,stamp,xhat,yhat,thetahat):
+    def publish_ekf_estimator(self,header,frame_id,stamp,xhat,yhat,thetahat):
         self.ekf.header.frame_id = header
         self.ekf.child_frame_id = frame_id
         self.ekf.header.stamp = stamp
