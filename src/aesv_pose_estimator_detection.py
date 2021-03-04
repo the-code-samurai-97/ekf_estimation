@@ -1,0 +1,170 @@
+#!/usr/bin/env python
+import rospy, numpy as np,math,matplotlib.pyplot as plt
+from ParametersInitialization import *
+from EKF_estimation_algorithm import *
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist, Pose, Point, Quaternion
+from ackermann_msgs.msg import AckermannDriveStamped,AckermannDrive
+from tf.transformations import quaternion_from_euler, euler_from_quaternion
+
+#### Declaring
+
+class ekf_estimation():
+    #### initialization
+    def __init__(self):
+        self.pub = rospy.Publisher('ekf_estimated_Pose',Odometry)
+        rospy.Subscriber('cmd_vel',AckermannDriveStamped, self.cmd_vel_callback)
+        rospy.Subscriber('global_odom',Odometry,self.odometry_callback)
+        self.init = 0
+        self.detection_init = 0
+        self.counter = 0
+        self.linear_velocity = 0.0
+        self.angular_velocity = 0.0
+        self.position_x = list()
+        self.position_y = list()
+        self.estimated_x = list()
+        self.estimated_y = list()
+        self.mp = np.array([[1,0,0],[0,1,0],[0,0,0.3]])
+        self.omega_tun_param = 1 * np.ones([3,3])
+        self.G_tk = list()
+        self.CUMSUM_S_tk = np.zeros([3,3])
+        self.Threshold_param = 10.556303128934996e+23 
+        self.time = 0
+        self.seconds_time = list()
+        self.residual1 = list()
+        self.residual2 = list()
+        self.residual3 = list()
+        self.covMatrix = np.zeros([3,3])
+        self.stack_residue = list()
+        self.cumsum = list()
+        self.ekf = Odometry()
+    
+    #### velocity call back 
+    def cmd_vel_callback(self,msg):
+        self.linear_velocity = msg.drive.speed
+        self.angular_velocity = msg.drive.steering_angle_velocity
+    
+    #### odometry call back
+    def odometry_callback(self,msg):
+        [roll,pitch,yaw_z] = euler_from_quaternion([msg.pose.pose.orientation.x,msg.pose.pose.orientation.y,msg.pose.pose.orientation.z,msg.pose.pose.orientation.w])
+        vLidar = np.array([[msg.pose.pose.position.x,msg.pose.pose.position.y,yaw_z]])
+        
+        if self.init==0:
+            fig,self.axs = plt.subplots(2, 2)
+            self.time = rospy.get_time()
+            self.fnewxhat = msg.pose.pose.orientation.x
+            self.fnewyhat = msg.pose.pose.orientation.y
+            self.fnewthetahat = yaw_z
+        self.init = 1
+        [self.fnewxhat,self.fnewyhat,self.fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,self.fnewxhat,self.fnewyhat,self.fnewthetahat,self.linear_velocity,self.angular_velocity,np.transpose(vLidar),self.mp,1/30)
+        self.sensor_detection(fresidual)
+        if np.max(fresidual)==0:
+            print("residual_zero",rospy.get_time() - self.time)
+        else:
+            self.store_values(msg.pose.pose.position.x,msg.pose.pose.position.y,fresidual[0][0],fresidual[1][0],fresidual[2][0])
+        self.ekf_estimator(msg.header.frame_id,msg.child_frame_id,msg.header.stamp,self.fnewxhat,self.fnewyhat,self.fnewthetahat)
+    #### Publishing Estimated values
+    def ekf_estimator(self,header,frame_id,stamp,xhat,yhat,thetahat):
+        self.ekf.header.frame_id = header
+        self.ekf.child_frame_id = frame_id
+        self.ekf.header.stamp = stamp
+        self.ekf.pose.pose.position.x = xhat;
+        self.ekf.pose.pose.position.y = yhat;
+        self.ekf.pose.pose.position.z = 0.0;
+        ekf_quaternion = quaternion_from_euler(0, 0,thetahat)
+        self.ekf.pose.pose.orientation.x = ekf_quaternion[0]
+        self.ekf.pose.pose.orientation.y = ekf_quaternion[1]
+        self.ekf.pose.pose.orientation.z = ekf_quaternion[2]
+        self.ekf.pose.pose.orientation.w = ekf_quaternion[3]
+        self.pub.publish(self.ekf)
+       
+    #### storing and plotting vaalues
+    def store_values(self,x,y,fresidual00,fresidual10,fresidual20):
+        self.position_x.append(x)
+        self.position_y.append(y)
+        self.estimated_x.append(self.fnewxhat)
+        self.estimated_y.append(self.fnewyhat)
+        self.seconds_time.append(rospy.get_time() - self.time)
+        self.residual1.append(fresidual00)
+        self.residual2.append(fresidual10)
+        self.residual3.append(fresidual20)
+        self.plot_x(self.residual1,self.residual2,self.residual3,self.seconds_time,self.position_x,self.position_y,self.estimated_x,self.estimated_y)
+        plt.ion()
+    
+    #### plotting
+    def plot_x(self,x1,x2,x3,t,SLAM_X,SLAM_Y,est_x,est_y):
+        if self.counter % 10 == 0:
+            self.axs[0,0].plot(t,x1,'tab:blue')
+            self.axs[0,0].set_title('residuals blue1')
+            
+            self.axs[0,1].set_title('residuals red2')
+            self.axs[0,1].plot(t,x2,'tab:red')
+            
+            self.axs[1,0].set_title('residuals green3')
+            self.axs[1,0].plot(t,x3,'tab:green')
+            
+            self.axs[1,1].plot(SLAM_X,SLAM_Y,'tab:blue')
+            self.axs[1,1].set_title('SLAM pose vs Estimated')
+            self.axs[1,1].plot(est_x,est_y,'tab:red')
+            plt.draw()
+            plt.pause(0.000000001)
+        self.counter += 1
+######detection part
+    def sensor_detection(self,residual):
+        if self.detection_init==0:
+            stack = [residual[0][0],residual[1][0],residual[2][0]]
+            self.stack_residue.insert(0,stack)
+            self.detection_init = 1
+            print("stack",self.stack_residue)
+        elif self.detection_init == 1:
+            stack = [residual[0][0],residual[1][0],residual[2][0]]
+            self.stack_residue.insert(1,stack)
+            self.detection_init = 2
+            print("stack",self.stack_residue)
+        elif self.detection_init == 2:
+            stack = [residual[0][0],residual[1][0],residual[2][0]]
+            self.stack_residue.insert(2,stack)
+            self.detection_init = 3
+            print("stack",self.stack_residue)
+        elif self.detection_init == 3:
+            self.detection_init = 3
+            stack = [residual[0][0],residual[1][0],residual[2][0]]
+            self.stack_residue.insert(3,stack)
+            self.stack_residue.pop(0)
+            print("stack",self.stack_residue)
+            #### have 3 residue values to create a 3 X 3 covariance matrix
+            self.covMatrix = np.cov(self.stack_residue,rowvar=False,bias=True)
+            ##### trying inverse if not trying psuedo inverse
+            try:
+                inverse_covariance = np.linalg.inv(self.covMatrix)
+            except:
+                inverse_covariance = np.linalg.pinv(self.covMatrix)
+            #### CREATING g(t k )
+            first_mul=np.dot(np.transpose(residual),inverse_covariance)
+            G_tk_white_residual = np.dot(first_mul,residual)
+            self.G_tk.append(G_tk_white_residual[0][0])
+            ###print("Gtk",G_tk_white_residual)
+            self.CUMSUM_S_tk = np.ndarray.max((self.CUMSUM_S_tk + G_tk_white_residual)-abs(((sum(self.G_tk)/len(self.G_tk)))))
+            # print("cumsum max value",self.CUMSUM_S_tk+ G_tk_white_residual)
+            # print("Average",(sum(self.G_tk)/len(self.G_tk)))
+            print("cu sum",self.CUMSUM_S_tk)
+            self.cumsum.append(self.CUMSUM_S_tk)
+            print("max value",max(self.cumsum))
+            print("\n")
+            #### alarm detection
+            if self.CUMSUM_S_tk >= self.Threshold_param:
+                print("Alarm")
+                
+            else:
+                print("no Alarm")
+                print("\n")
+                print("\n")
+
+
+if __name__ == "__main__":
+    rospy.init_node('self.pub_estimation')
+    try:
+        ekf_estimation()
+    except rospy.ROSInterruptException:
+        pass
+    rospy.spin()

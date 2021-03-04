@@ -6,8 +6,11 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, Pose, Point, Quaternion
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 #  globaling variables
-global new_msg1, new_msg2,EKF,fpositionx,fpositiony,fnewxhat1,fnewyhat1,yaw,fnewthetahat1;
+global new_msg1, new_msg2,EKF,fpositionx,fpositiony,fnewxhat1,fnewyhat1,yaw,fnewthetahat1,CUMSUM_S_tk,omega_tun_param,Threshold_param;
+Threshold_param = 1*np.ones([3,3]);
+omega_tun_param = 5* np.ones([3,3]);
 mp = np.array([[1,0,0],[0,1,0],[0,0,0.3]]);
+CUMSUM_S_tk=np.zeros([3,3]);
 fpositionx = list();fpositiony = list();yaw=list();fnewxhat1 = [];fnewyhat1 = [];fnewthetahat1=[]
 # Plotting Variables
 def plot_x(fpositionx,fpositiony,fnewxhat1,fnewyhat1):
@@ -50,7 +53,19 @@ while not rospy.is_shutdown():
     [roll,pitch,yaw_z] = euler_from_quaternion([new_msg1.pose.pose.orientation.x,new_msg1.pose.pose.orientation.y,new_msg1.pose.pose.orientation.z,new_msg1.pose.pose.orientation.w]);
     vLidar = np.array([[new_msg1.pose.pose.position.x,new_msg1.pose.pose.position.y,yaw_z]]);
     [fnewxhat,fnewyhat,fnewthetahat,mnewP,fresidual] = EKF_Lidar(sParameter,new_msg1.pose.pose.position.x,new_msg1.pose.pose.position.y,yaw_z,new_msg2.linear.x,new_msg2.angular.z,np.transpose(vLidar),mp,0.1);
+    #detection
+    print(fresidual)
+    covMatrix = np.cov(fresidual,bias=True)
+    first_mul=np.dot(np.transpose(fresidual),covMatrix)
+    G_tk_white_residual=np.dot(first_mul,fresidual)
+    CUMSUM_S_tk = np.ndarray.max((CUMSUM_S_tk+G_tk_white_residual)-omega_tun_param)
+    if CUMSUM_S_tk >= np.ndarray.max(Threshold_param):
+        print("Alarm")
+    else:
+        print("no Alarm")
+    print("G_tk",G_tk_white_residual)
     #publishing as EKF_estimation
+        
     EKF.pose.pose.position.x = fnewxhat;
     EKF.pose.pose.position.y = fnewyhat;
     EKF.pose.pose.position.z = 0.0;    
